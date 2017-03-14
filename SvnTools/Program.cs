@@ -13,7 +13,8 @@ namespace SvnTools
 
         static void Main(string[] args)
         {
-            string[] list = List(kRepository + kBranchesRoot);
+            //string[] list = List(kRepository + kBranchesRoot);
+            SvnPropertyValue[] properties = GetMergeInfoProperties(kRepository + kTrunk);
         }
 
         static string[] List(string target)
@@ -32,6 +33,29 @@ namespace SvnTools
                     }
 
                     return files.ToArray();
+                }
+                else
+                {
+                    return null;
+                }
+            }
+        }
+
+        static SvnPropertyValue[] GetMergeInfoProperties(string target)
+        {
+            using (var client = new SvnClient())
+            {
+                var args = new SvnGetPropertyArgs()
+                {
+                    Depth = SvnDepth.Infinity
+                };
+
+                SvnTargetPropertyCollection properties;
+
+                bool gotList = client.GetProperty(target, "svn:mergeinfo", args, out properties);
+                if (gotList)
+                {
+                    return new List<SvnPropertyValue>(properties).ToArray();
                 }
                 else
                 {
