@@ -1,8 +1,6 @@
-﻿using System;
+﻿using SharpSvn;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Collections.ObjectModel;
 
 namespace SvnTools
 {
@@ -15,13 +13,30 @@ namespace SvnTools
 
         static void Main(string[] args)
         {
-            try
+            string[] list = List(kRepository + kBranchesRoot);
+        }
+
+        static string[] List(string target)
+        {
+            using (var client = new SvnClient())
             {
-                string[] branches = Svn.List(kRepository + kBranchesRoot);
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(e.ToString());
+                Collection<SvnListEventArgs> list;
+
+                bool gotList = client.GetList(target, out list);
+                if (gotList)
+                {
+                    List<string> files = new List<string>();
+                    foreach (SvnListEventArgs item in list)
+                    {
+                        files.Add(item.Path);
+                    }
+
+                    return files.ToArray();
+                }
+                else
+                {
+                    return null;
+                }
             }
         }
     }
