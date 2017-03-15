@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -9,71 +10,72 @@ namespace SvnTools
 {
     class Program
     {
-        const string kRepository = "https://svn.mediatonic.co.uk:8443/svn/060_project_fortune/";
-        const string kBranchesRoot = "branches/";
-        const string kTrunk = "trunk/";
-
+        private const string kRepository = "https://svn.mediatonic.co.uk:8443/svn/060_project_fortune/";
+        private const string kBranchesRoot = "branches/";
+        private const string kTrunk = "trunk/";
+        private const string kSvnMergeInfo = "svn:mergeinfo";
 
         static void Main(string[] args)
         {
-            string[] branches = null;
-            DoThread(() =>
+            try
             {
-                branches = List(kRepository + kBranchesRoot);
-            });
-            if (branches != null)
-            {
-                Console.WriteLine("Branches:");
-                foreach (string branch in branches)
-                {
-                    Console.WriteLine(branch);
-                }
-                Console.WriteLine();
-            }
-            
+                string target = (args.Length > 0) ? args[0] : System.IO.Directory.GetCurrentDirectory();
 
-            SvnPropertyValue[] properties = null;
-            DoThread(() =>
+                CleanMergeInfo(target);
+            }
+            catch (Exception e)
             {
-                properties = GetMergeInfoProperties(kRepository + kTrunk);
+                Console.Write(e);
+            }
+        }
+
+        private static void CleanMergeInfo(string target)
+        {
+            SvnPropertyValue[] properties = null;
+            Threading.DoThread(() =>
+            {
+                properties = GetMergeInfoProperties(target);
             });
 
             if (properties != null)
             {
-                Console.WriteLine("MergeInfo:");
                 foreach (SvnPropertyValue property in properties)
                 {
                     Console.WriteLine(property.Target);
-                }
-                Console.WriteLine();
-            }
-        }
 
-        static string[] List(string target)
-        {
-            using (var client = new SvnClient())
-            {
-                Collection<SvnListEventArgs> list;
+                    string before = property.StringValue;
 
-                bool gotList = client.GetList(target, out list);
-                if (gotList)
-                {
-                    List<string> files = new List<string>();
-                    foreach (SvnListEventArgs item in list)
+                    var mergeInfo = new MergeInfo(before);
+
+                    StripNonExistantSources(mergeInfo);
+
+                    // Warning: Project specific code. We need to strip merge info before
+                    // this specific revision. This should really be an argument.
+                    const int kLastValidRevision = 10616;
+                    StripCheckinsBeforeRevision(mergeInfo, kLastValidRevision);
+
+                    if (mergeInfo.Entries.Count > 0)
                     {
-                        files.Add(item.Path);
+                        string after = mergeInfo.ToString();
+                        Console.WriteLine(after);
+                        Svn.SetProperty(property.Target.TargetName, kSvnMergeInfo, after);
+                    }
+                    else
+                    {
+                        Console.WriteLine("DELETED");
+                        Svn.DeleteProperty(property.Target.TargetName, kSvnMergeInfo);
                     }
 
-                    return files.ToArray();
+                    Console.WriteLine();
                 }
-                else
-                {
-                    return null;
-                }
+            }
+            else
+            {
+                throw new Exception("Unable to find mergeinfo properties for target '" + target + "'");
             }
         }
 
-        static SvnPropertyValue[] GetMergeInfoProperties(string target)
+        private static SvnPropertyValue[] GetMergeInfoProperties(string target)
         {
             using (var client = new SvnClient())
             {
@@ -84,7 +86,7 @@ namespace SvnTools
 
                 SvnTargetPropertyCollection properties;
 
-                bool gotList = client.GetProperty(target, "svn:mergeinfo", args, out properties);
+                bool gotList = client.GetProperty(target, kSvnMergeInfo, args, out properties);
                 if (gotList)
                 {
                     return new List<SvnPropertyValue>(properties).ToArray();
@@ -96,43 +98,55 @@ namespace SvnTools
             }
         }
 
-        private static void DoThread(Action action)
+        private static void StripCheckinsBeforeRevision(MergeInfo mergeInfo, int revision)
         {
-            Task task = new Task(action);
-            task.Start();
-
-            if (Console.CursorLeft > 0)
+            var newEntries = new List<MergeInfoEntry>();
+            foreach (MergeInfoEntry entry in mergeInfo.Entries)
             {
-                Console.WriteLine();
-            }
-
-            Console.Write("Working");
-
-            // Animate some 10 dots appearing in order
-            int dotsStart = Console.CursorLeft;
-            const int kDotCount = 3;
-            int currentDot = 0;
-            while (!task.IsCompleted)
-            {
-                if (currentDot >= kDotCount)
+                var newRanges = new List<MergeInfoRange>();
+                foreach (MergeInfoRange range in entry.Ranges)
                 {
-                    Console.SetCursorPosition(dotsStart, Console.CursorTop);
-                    Console.Write("          ");
-                    Console.SetCursorPosition(dotsStart, Console.CursorTop);
-                    currentDot = 0;
+                    if (range.From >= revision)
+                    {
+                        newRanges.Add(range);
+                    }
+                    else if (range.To >= revision)
+                    {
+                        // Range spans boundary, split it
+                        MergeInfoRange newRange = new MergeInfoRange()
+                        {
+                            From = revision,
+                            To = range.To
+                        };
+                        newRanges.Add(newRange);
+                    }
                 }
 
-                Console.Write(".");
-                ++currentDot;
-
-                Thread.Sleep(1000);
+                if (newRanges.Count > 0)
+                {
+                    newEntries.Add(new MergeInfoEntry()
+                    {
+                        Source = entry.Source,
+                        Ranges = newRanges
+                    });
+                }
             }
 
-            // Clear the line and return cursor to the start
-            int numChars = Console.CursorLeft;
-            Console.SetCursorPosition(0, Console.CursorTop);
-            Console.Write(new String(' ', numChars));
-            Console.SetCursorPosition(0, Console.CursorTop);
+            mergeInfo.Entries = newEntries;
+        }
+
+        private static void StripNonExistantSources(MergeInfo mergeInfo)
+        {
+            List<MergeInfoEntry> newMergeInfos = new List<MergeInfoEntry>(mergeInfo.Entries.Count);
+            foreach (MergeInfoEntry entry in mergeInfo.Entries)
+            {
+                string repoPath = kRepository + entry.Source;
+                if (Svn.TargetExists(repoPath))
+                {
+                    newMergeInfos.Add(entry);
+                }
+            }
+            mergeInfo.Entries = newMergeInfos;
         }
     }
 }
